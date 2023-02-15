@@ -13,6 +13,7 @@ from chip.ChipDeviceCtrl import CommissionableNode
 from chip.clusters import Attribute, ClusterCommand
 from chip.exceptions import ChipStackError
 
+from ..common.const import SCHEMA_VERSION
 from ..common.helpers.api import api_command
 from ..common.helpers.util import dataclass_from_dict
 from ..common.models.api_command import APICommand
@@ -21,14 +22,11 @@ from ..common.models.error import (
     NodeInterviewFailed,
     NodeNotExists,
     NodeNotResolving,
-    SDKCommandFailed,
 )
 from ..common.models.events import EventType
 from ..common.models.node import MatterAttribute, MatterNode
-from .const import SCHEMA_VERSION
 
 if TYPE_CHECKING:
-
     from .server import MatterServer
 
 _T = TypeVar("_T")
@@ -84,7 +82,7 @@ class MatterDeviceController:
             except NodeNotResolving:
                 LOGGER.warning("Node %s is not resolving, skipping...", node_id)
         # create task to check for nodes that need any re(interviews)
-        asyncio.create_task(self._check_interviews())
+        self._schedule_interviews()
         LOGGER.debug("Loaded %s nodes", len(self._nodes))
 
     async def stop(self) -> None:
@@ -173,26 +171,22 @@ class MatterDeviceController:
     @api_command(APICommand.SET_WIFI_CREDENTIALS)
     async def set_wifi_credentials(self, ssid: str, credentials: str) -> None:
         """Set WiFi credentials for commissioning to a (new) device."""
-        error_code = await self._call_sdk(
+        await self._call_sdk(
             self.chip_controller.SetWiFiCredentials,
             ssid=ssid,
             credentials=credentials,
         )
 
-        if error_code != 0:
-            raise SDKCommandFailed("Set WiFi credentials failed.")
         self.wifi_credentials_set = True
 
     @api_command(APICommand.SET_THREAD_DATASET)
     async def set_thread_operational_dataset(self, dataset: str) -> None:
         """Set Thread Operational dataset in the stack."""
-        error_code = await self._call_sdk(
+        await self._call_sdk(
             self.chip_controller.SetThreadOperationalDataset,
             threadOperationalDataset=bytes.fromhex(dataset),
         )
 
-        if error_code != 0:
-            raise SDKCommandFailed("Set Thread credentials failed.")
         self.thread_credentials_set = True
 
     @api_command(APICommand.OPEN_COMMISSIONING_WINDOW)
@@ -276,11 +270,22 @@ class MatterDeviceController:
 
     @api_command(APICommand.DEVICE_COMMAND)
     async def send_device_command(
-        self, node_id: int, endpoint: int, payload: ClusterCommand
+        self,
+        node_id: int,
+        endpoint: int,
+        payload: ClusterCommand,
+        response_type: Any | None = None,
+        timed_request_timeout_ms: int | None = None,
+        interaction_timeout_ms: int | None = None,
     ) -> Any:
         """Send a command to a Matter node/device."""
         return await self.chip_controller.SendCommand(
-            nodeid=node_id, endpoint=endpoint, payload=payload
+            nodeid=node_id,
+            endpoint=endpoint,
+            payload=payload,
+            responseType=response_type,
+            timedRequestTimeoutMs=timed_request_timeout_ms,
+            interactionTimeoutMs=interaction_timeout_ms,
         )
 
     @api_command(APICommand.REMOVE_NODE)
@@ -424,7 +429,11 @@ class MatterDeviceController:
             ):
                 await self.interview_node(node.node_id)
         # reschedule self to run every hour
-        self.server.loop.call_later(3600, asyncio.create_task, self._check_interviews())
+        self.server.loop.call_later(3600, self._schedule_interviews)
+
+    def _schedule_interviews(self) -> None:
+        """Schedule interviews."""
+        asyncio.create_task(self._check_interviews())
 
     @staticmethod
     def _parse_attributes_from_read_result(
@@ -434,7 +443,7 @@ class MatterDeviceController:
         result = {}
         for endpoint, cluster_dict in attributes.items():
             # read result output is in format {endpoint: {ClusterClass: {AttributeClass: value}}}
-            # we parse this to our own much more useable format
+            # we parse this to our own much more usable format
             for cluster_cls, attr_dict in cluster_dict.items():
                 for attr_cls, attr_value in attr_dict.items():
                     if attr_cls == Attribute.DataVersion:

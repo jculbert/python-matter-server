@@ -189,7 +189,7 @@ class MatterNode:
             return attr_name[:1].lower() + attr_name[1:]
 
         # instantiate a Cluster object from the properties
-        # TODO: find another way to do this without loosing the individual cluster attributes
+        # TODO: find another way to do this without losing the individual cluster attributes
         # pylint: disable=import-outside-toplevel
         from ..helpers.util import dataclass_from_dict
 
@@ -203,7 +203,9 @@ class MatterNode:
         return cast(
             str,
             self.get_attribute(
-                self.root_device_type_instance.endpoint, Clusters.Basic, "NodeLabel"
+                self.root_device_type_instance.endpoint,
+                Clusters.BasicInformation,
+                "NodeLabel",
             ).value,
         )
 
@@ -213,7 +215,9 @@ class MatterNode:
         return cast(
             str,
             self.get_attribute(
-                self.root_device_type_instance.endpoint, Clusters.Basic, "UniqueID"
+                self.root_device_type_instance.endpoint,
+                Clusters.BasicInformation,
+                "UniqueID",
             ).value,
         )
 

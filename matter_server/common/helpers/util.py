@@ -41,8 +41,8 @@ from ..models.node import *  # noqa: F401 F403
 
 try:
     # python 3.10
-    from types import NoneType, UnionType  # type: ignore[attr-defined]
-except:  # noqa
+    from types import NoneType, UnionType  # type:ignore[attr-defined]
+except ImportError:  # noqa
     # older python version
     NoneType = type(None)
     UnionType = type(Union)
@@ -52,6 +52,11 @@ _T = TypeVar("_T")
 
 CHIP_CLUSTERS_PKG_NAME = "home-assistant-chip-clusters"
 CHIP_CORE_PKG_NAME = "home-assistant-chip-core"
+
+# TEMP: Basic Cluster got renamed in SDK version v1.0.0.2
+# we will fix this later when we're basing our datastructure
+# on the ids instead of types.
+chip.clusters.Objects.Basic = chip.clusters.Objects.BasicInformation
 
 
 def dataclass_to_dict(obj_in: object, skip_none: bool = False) -> dict:
@@ -108,7 +113,7 @@ def parse_value(
         return implicit_dataclass_from_dict(value)
     if isinstance(value_type, str):
         # type is provided as string
-        if value_type == "type":
+        if value_type == "type" and isinstance(value, str):
             return locate(value) or eval(value)
         try:
             value_type = eval(value_type)
