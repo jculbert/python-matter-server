@@ -1,0 +1,1 @@
+docker run -d --name matter-server2 --net=host --privileged -v /var/run/dbus/:/var/run/dbus/:z -v /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket -v ${HOME}/builds:/builds -v /home/auto/builds/home-assistant/matter-server2/data:/data/ matter-server2
