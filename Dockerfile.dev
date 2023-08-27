@@ -19,6 +19,7 @@ RUN \
         libcairo2 \
         gdb \
         vim \
+        net-tools \
     && apt-get purge -y --auto-remove \
     && rm -rf \
         /var/lib/apt/lists/* \
