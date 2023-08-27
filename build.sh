@@ -1,1 +1,1 @@
-docker build --rm -t matter-server2 -f Dockerfile.dev .
+docker build --rm -t matter-server -f Dockerfile.dev .

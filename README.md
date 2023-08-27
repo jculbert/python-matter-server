@@ -1,6 +1,6 @@
 # Python Matter Server
 
-This project implements a Matter Controller Server over WebSockets using the [official CHIP SDK](https://github.com/project-chip/connectedhomeip) as a base and provides both a server and client implementation.
+This project implements a Matter Controller Server over WebSockets using the [official Matter (formerly CHIP) SDK](https://github.com/project-chip/connectedhomeip) as a base and provides both a server and client implementation.
 
 The goal of this project is primary to have Matter support in Home Assistant but its universal approach makes it suitable to be used in other projects too.
 
@@ -8,14 +8,14 @@ This repository is for development only (so not for enduser support). For enabli
 
 NOTE: Both Matter and this implementation are in early (v1) state and features are probably missing or could be improved. See our [development notes](#development) how you can help out, with development and/or testing.
 
-## Trying it out
+## Running the development server
 
-`For enabling Matter support within Home Assistant, please refer to the Home Assistant documentation. These instructions are for development/advanced scenarios only!`
+**For enabling Matter support within Home Assistant, please refer to the Home Assistant documentation. These instructions are for development/advanced scenarios only!**
 
 To install the server (including client): `pip install python-matter-server[server]`
 To only install the client part: `pip install python-matter-server`
 
-The client library has a dependency on the chip clusters package which contains all (Cluster) models and this package is os/platform independent. The server library depends on the CHIP Core SDK which is architecture and OS specific. We build (and publish) wheels for Linux (amd64 and aarch64) to pypi but for other platforms (like Macos) you will need to build those wheels yourself using the exact same version of the SDK as we use for the clusters package. Take a look at our build script for directions: https://github.com/home-assistant-libs/chip-wheels/blob/main/.github/workflows/build.yaml
+The client library has a dependency on the chip/matter clusters package which contains all (Cluster) models and this package is os/platform independent. The server library depends on the Matter Core SDK (still named CHIP) which is architecture and OS specific. We build (and publish) wheels for Linux (amd64 and aarch64) to pypi but for other platforms (like Macos) you will need to build those wheels yourself using the exact same version of the SDK as we use for the clusters package. Take a look at our build script for directions: https://github.com/home-assistant-libs/chip-wheels/blob/main/.github/workflows/build.yaml
 
 Once you have the wheels installed, you can check out the example script in the scripts folder for generic directions to run the client and server. To just run the server, you can run:
 
@@ -193,17 +193,15 @@ Please note that development is only possible on Linux and MacOS, no Windows sup
 - Create a Python virtual environment.
 - Install the correct SDK wheels for both the cluster and core package, see instructions above if there is no wheel for your setup prebuilt.
 
-## Dockerfile
+### Note when using Thread based Matter devices
 
-### Build
+When communicating with Thread devices through a non-local Thread border router,
+your host must process ICMPv6 Router Advertisements. See the [openthread.io
+Bidirectional IPv6 Connectivity code labs](https://openthread.io/codelabs/openthread-border-router#6)
+on how-to setup your host correctly. Note that NetworkManager has its own ICMPv6
+Router Advertisement processing. A recent version of NetworkManager is
+necessary, and there are still known issues (see NetworkManager issue
+[#1232](https://gitlab.freedesktop.org/NetworkManager/NetworkManager/-/issues/1232)).
 
-```sh
-docker compose build --no-cache
-```
-
-### Run
-
-```sh
-docker compose up -d
-docker compose logs -f
-```
+The Home Assistant Operating System 10 and newer correctly processes ICMPv6
+Router Advertisements.

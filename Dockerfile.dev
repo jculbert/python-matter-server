@@ -1,4 +1,4 @@
-FROM python:3.10-slim-bullseye
+FROM python:3.11-slim-bullseye
 
 # Set shell
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -13,13 +13,12 @@ RUN \
         openssl \
         zlib1g \
         libjson-c5 \
+        libnl-3-200 \
+        libnl-route-3-200 \
         unzip \
         libcairo2 \
         gdb \
         vim \
-        gcc \
-        linux-libc-dev \
-        libc6-dev \
     && apt-get purge -y --auto-remove \
     && rm -rf \
         /var/lib/apt/lists/* \

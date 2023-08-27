@@ -27,7 +27,7 @@ class DeviceType:
 
     def __hash__(self) -> int:
         """Return unique hash for this object."""
-        return hash(self.device_type)
+        return self.device_type
 
 
 class OrphanClusters(DeviceType, device_type=0xF001):
@@ -108,7 +108,7 @@ class BridgedDevice(DeviceType, device_type=0x0013):
 
     clusters = {
         all_clusters.Descriptor,
-        all_clusters.BridgedDeviceBasic,
+        all_clusters.BridgedDeviceBasicInformation,
         all_clusters.PowerSourceConfiguration,
         all_clusters.PowerSource,
     }

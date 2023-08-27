@@ -137,16 +137,16 @@ class MatterClient:
         node_id: int,
         timeout: int = 300,
         iteration: int = 1000,
-        option: int = 0,
+        option: int = 1,
         discriminator: Optional[int] = None,
-    ) -> int:
+    ) -> tuple[int, str]:
         """
         Open a commissioning window to commission a device present on this controller to another.
 
         Returns code to use as discriminator.
         """
         return cast(
-            int,
+            tuple[int, str],
             await self.send_command(
                 APICommand.OPEN_COMMISSIONING_WINDOW,
                 node_id=node_id,
@@ -183,7 +183,7 @@ class MatterClient:
                 vendor_id=f.vendorId,
                 fabric_index=f.fabricIndex,
                 fabric_label=f.label if f.label else None,
-                vendor_name=vendors_map.get(f.vendorId),
+                vendor_name=vendors_map.get(str(f.vendorId)),
             )
             for f in fabrics
         ]

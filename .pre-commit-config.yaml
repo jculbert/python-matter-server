@@ -9,12 +9,14 @@ repos:
            - --quiet
         files: ^(matter_server|scripts)/.+\.py$
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.2.2
+    rev: v2.2.4
     hooks:
       - id: codespell
         args: []
         exclude_types: [csv, json]
         exclude: ^tests/fixtures/
+        additional_dependencies:
+          - tomli
   - repo: https://github.com/PyCQA/flake8
     rev: 6.0.0
     hooks:
@@ -36,15 +38,14 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: mypy
+        entry: scripts/run-in-env.sh mypy
         types: [python]
-        language: system
+        language: script
         files: ^(matter_server)/.+\.py$
-        require_serial: true
-#      - id: pylint
-#        name: pylint
-#        entry: pylint -j 0
-#        types: [python]
-#        language: script
-#        files: ^(matter_server)/.+\.py$
-#        require_serial: true
+
+      - id: pylint
+        name: pylint
+        entry: scripts/run-in-env.sh pylint -j 0
+        types: [python]
+        language: script
+        files: ^(matter_server)/.+\.py$
