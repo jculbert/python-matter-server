@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import pprint
 from typing import Any, Callable, Dict, Final, cast
 
@@ -33,6 +34,7 @@ from .exceptions import (
 from .models.node import MatterNode
 
 LOGGER = logging.getLogger(f"{__package__}.connection")
+VERBOSE_LOGGER = os.environ.get("MATTER_VERBOSE_LOGGING")
 SUB_WILDCARD: Final = "*"
 
 
@@ -128,7 +130,7 @@ class MatterClientConnection:
         except ValueError as err:
             raise InvalidMessage("Received invalid JSON.") from err
 
-        if LOGGER.isEnabledFor(logging.DEBUG):
+        if VERBOSE_LOGGER and LOGGER.isEnabledFor(logging.DEBUG):
             LOGGER.debug("Received message:\n%s\n", pprint.pformat(ws_msg))
 
         return msg
@@ -142,7 +144,7 @@ class MatterClientConnection:
         if not self.connected:
             raise NotConnected
 
-        if LOGGER.isEnabledFor(logging.DEBUG):
+        if VERBOSE_LOGGER and LOGGER.isEnabledFor(logging.DEBUG):
             LOGGER.debug("Publishing message:\n%s\n", pprint.pformat(message))
 
         assert self._ws_client

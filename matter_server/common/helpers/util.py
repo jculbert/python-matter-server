@@ -1,7 +1,7 @@
 """Utils for Matter server (and client)."""
 from __future__ import annotations
 
-from base64 import b64decode, b64encode
+from base64 import b64decode
 import binascii
 from dataclasses import MISSING, asdict, fields, is_dataclass
 from datetime import datetime
@@ -22,7 +22,7 @@ from typing import (
 )
 
 from chip.clusters.ClusterObjects import ClusterAttributeDescriptor
-from chip.clusters.Types import Nullable, NullValue
+from chip.clusters.Types import Nullable
 from chip.tlv import float32, uint
 
 if TYPE_CHECKING:
@@ -59,44 +59,17 @@ def parse_attribute_path(attribute_path: str) -> tuple[int, int, int]:
     return (int(endpoint_id_str), int(cluster_id_str), int(attribute_id_str))
 
 
-def dataclass_to_dict(obj_in: DataclassInstance, skip_none: bool = False) -> dict:
-    """Convert dataclass instance to dict, optionally skip None values."""
-    if skip_none:
-        dict_obj = asdict(
-            obj_in, dict_factory=lambda x: {k: v for (k, v) in x if v is not None}
-        )
-    else:
-        dict_obj = asdict(obj_in)
+def dataclass_to_dict(obj_in: DataclassInstance) -> dict:
+    """Convert dataclass instance to dict."""
 
-    def _convert_value(value: Any) -> Any:
-        """Do some common conversions."""
-        if isinstance(value, list):
-            return [_convert_value(x) for x in value]
-        if isinstance(value, Nullable) or value == NullValue:
-            return None
-        if isinstance(value, dict):
-            return _clean_dict(value)
-        if isinstance(value, Enum):
-            return value.value
-        if isinstance(value, bytes):
-            return b64encode(value).decode("utf-8")
-        if isinstance(value, float32):
-            return float(value)
-        if type(value) == type:
-            return f"{value.__module__}.{value.__qualname__}"
-        if isinstance(value, Exception):
-            return None
-        return value
-
-    def _clean_dict(_dict_obj: dict) -> dict:
-        _final = {}
-        for key, value in _dict_obj.items():
-            if isinstance(key, int):
-                key = str(key)
-            _final[key] = _convert_value(value)
-        return _final
-
-    return _clean_dict(dict_obj)
+    return asdict(
+        obj_in,
+        dict_factory=lambda x: {
+            # ensure the dict key is a string
+            str(k): v
+            for (k, v) in x
+        },
+    )
 
 
 def parse_utc_timestamp(datetime_string: str) -> datetime:
@@ -106,6 +79,7 @@ def parse_utc_timestamp(datetime_string: str) -> datetime:
 
 def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) -> Any:
     """Try to parse a value from raw (json) data and type annotations."""
+    # pylint: disable=too-many-return-statements,too-many-branches
 
     if isinstance(value_type, str):
         # this shouldn't happen, but just in case
@@ -132,14 +106,14 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
         return dataclass_from_dict(value_type, value)
     # get origin value type and inspect one-by-one
     origin: Any = get_origin(value_type)
-    if origin in (list, tuple) and isinstance(value, list | tuple):
+    if origin in (list, tuple, set) and isinstance(value, (list, tuple, set)):
         return origin(
             parse_value(name, subvalue, get_args(value_type)[0])
             for subvalue in value
             if subvalue is not None
         )
     # handle dictionary where we should inspect all values
-    elif origin is dict:
+    if origin is dict:
         subkey_type = get_args(value_type)[0]
         subvalue_type = get_args(value_type)[1]
         return {
@@ -149,7 +123,7 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
             for subkey, subvalue in value.items()
         }
     # handle Union type
-    elif origin is Union or origin is UnionType:
+    if origin is Union or origin is UnionType:
         # try all possible types
         sub_value_types = get_args(value_type)
         for sub_arg_type in sub_value_types:
@@ -170,9 +144,9 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
             # raise exception, we have no idea how to handle this value
             raise TypeError(err)
         # failed to parse the (sub) value but None allowed, log only
-        logging.getLogger(__name__).warn(err)
+        logging.getLogger(__name__).warning(err)
         return None
-    elif origin is type:
+    if origin is type:
         return get_type_hints(value, globals(), locals())
     # handle Any as value type (which is basically unprocessable)
     if value_type is Any:
@@ -184,6 +158,7 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
     try:
         if issubclass(value_type, Enum):
             # handle enums from the SDK that have a value that does not exist in the enum (sigh)
+            # pylint: disable=protected-access
             if value not in value_type._value2member_map_:
                 # we do not want to crash so we return the raw value
                 return value
@@ -235,11 +210,10 @@ def dataclass_from_dict(cls: type[_T], dict_obj: dict, strict: bool = False) -> 
     If strict mode enabled, any additional keys in the provided dict will result in a KeyError.
     """
     if strict:
-        extra_keys = dict_obj.keys() - set([f.name for f in fields(cls)])
+        extra_keys = dict_obj.keys() - {f.name for f in fields(cls)}
         if extra_keys:
             raise KeyError(
-                "Extra key(s) %s not allowed for %s"
-                % (",".join(extra_keys), (str(cls)))
+                f'Extra key(s) {",".join(extra_keys)} not allowed for {str(cls)}'
             )
     type_hints = get_type_hints(cls)
     return cls(

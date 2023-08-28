@@ -10,7 +10,7 @@ import uuid
 from aiohttp import ClientSession
 from chip.clusters import Objects as Clusters
 
-from matter_server.common.errors import ERROR_MAP
+from matter_server.common.errors import ERROR_MAP, NodeNotExists
 
 from ..common.helpers.util import dataclass_from_dict, dataclass_to_dict
 from ..common.models import (
@@ -20,6 +20,7 @@ from ..common.models import (
     EventMessage,
     EventType,
     MatterNodeData,
+    MatterNodeEvent,
     MessageType,
     ResultMessageBase,
     ServerDiagnostics,
@@ -34,6 +35,8 @@ if TYPE_CHECKING:
     from chip.clusters.Objects import ClusterCommand
 
 SUB_WILDCARD: Final = "*"
+
+# pylint: disable=too-many-public-methods
 
 
 class MatterClient:
@@ -54,7 +57,7 @@ class MatterClient:
         """Return info of the server we're currently connected to."""
         return self.connection.server_info
 
-    def subscribe(
+    def subscribe_events(
         self,
         callback: Callable[[EventType, Any], None],
         event_filter: Optional[EventType] = None,
@@ -67,6 +70,10 @@ class MatterClient:
         Optionally filter by specific events or node attributes.
         Returns:
             function to unsubscribe.
+
+        NOTE: To receive attribute changed events,
+        you must also register the attributes to subscribe to
+        with the `subscribe_attributes` method.
         """
         # for fast lookups we create a key based on the filters, allowing
         # a "catch all" with a wildcard (*).
@@ -94,13 +101,15 @@ class MatterClient:
 
         return unsubscribe
 
-    async def get_nodes(self) -> list[MatterNode]:
+    def get_nodes(self) -> list[MatterNode]:
         """Return all Matter nodes."""
         return list(self._nodes.values())
 
-    async def get_node(self, node_id: int) -> MatterNode:
-        """Return Matter node by id."""
-        return self._nodes[node_id]
+    def get_node(self, node_id: int) -> MatterNode:
+        """Return Matter node by id or None if no node exists by that id."""
+        if node := self._nodes.get(node_id):
+            return node
+        raise NodeNotExists(f"Node {node_id} does not exist or is not yet interviewed")
 
     async def commission_with_code(self, code: str) -> MatterNodeData:
         """
@@ -164,7 +173,7 @@ class MatterClient:
         Returns a list of MatterFabricData objects.
         """
 
-        node = await self.get_node(node_id)
+        node = self.get_node(node_id)
         fabrics: list[
             Clusters.OperationalCredentials.Structs.FabricDescriptor
         ] = node.get_attribute_value(
@@ -225,9 +234,54 @@ class MatterClient:
             interaction_timeout_ms=interaction_timeout_ms,
         )
 
+    async def read_attribute(
+        self,
+        node_id: int,
+        attribute_path: str,
+    ) -> Any:
+        """Read a single attribute on a node."""
+        return await self.send_command(
+            APICommand.READ_ATTRIBUTE,
+            require_schema=4,
+            node_id=node_id,
+            attribute_path=attribute_path,
+        )
+
+    async def write_attribute(
+        self,
+        node_id: int,
+        attribute_path: str,
+        value: Any,
+    ) -> Any:
+        """Write an attribute(value) on a target node."""
+        return await self.send_command(
+            APICommand.WRITE_ATTRIBUTE,
+            require_schema=4,
+            node_id=node_id,
+            attribute_path=attribute_path,
+            value=value,
+        )
+
     async def remove_node(self, node_id: int) -> None:
         """Remove a Matter node/device from the fabric."""
         await self.send_command(APICommand.REMOVE_NODE, node_id=node_id)
+
+    async def subscribe_attribute(
+        self, node_id: int, attribute_path: str | list[str]
+    ) -> None:
+        """
+        Subscribe to given AttributePath(s).
+
+        Either supply a single attribute path or a list of paths.
+        The given attribute path(s) will be added to the list of attributes that
+        are watched for the given node. This is persistent over restarts.
+        """
+        await self.send_command(
+            APICommand.SUBSCRIBE_ATTRIBUTE,
+            require_schema=4,
+            node_id=node_id,
+            attribute_path=attribute_path,
+        )
 
     async def send_command(
         self,
@@ -366,7 +420,6 @@ class MatterClient:
 
         # handle EventMessage
         if isinstance(msg, EventMessage):
-            self.logger.debug("Received event: %s", msg)
             self._handle_event_message(msg)
             return
 
@@ -387,19 +440,41 @@ class MatterClient:
                 event = EventType.NODE_ADDED
                 node = MatterNode(node_data)
                 self._nodes[node.node_id] = node
+                self.logger.debug("New node added: %s", node.node_id)
             else:
                 event = EventType.NODE_UPDATED
                 node.update(node_data)
+                self.logger.debug("Node updated: %s", node.node_id)
             self._signal_event(event, data=node, node_id=node.node_id)
             return
-        if msg.event == EventType.NODE_DELETED:
+        if msg.event == EventType.NODE_REMOVED:
             node_id = msg.data
+            self.logger.debug("Node removed: %s", node_id)
+            self._signal_event(EventType.NODE_REMOVED, data=node_id, node_id=node_id)
+            # cleanup node only after signalling subscribers
             self._nodes.pop(node_id, None)
-            self._signal_event(EventType.NODE_DELETED, data=node_id, node_id=node_id)
+            return
+        if msg.event == EventType.ENDPOINT_REMOVED:
+            node_id = msg.data["node_id"]
+            endpoint_id = msg.data["endpoint_id"]
+            self.logger.debug("Endpoint removed: %s/%s", node_id, endpoint_id)
+            self._signal_event(
+                EventType.ENDPOINT_REMOVED, data=msg.data, node_id=node_id
+            )
+            # cleanup endpoint only after signalling subscribers
+            if node := self._nodes.get(node_id):
+                node.endpoints.pop(endpoint_id, None)
             return
         if msg.event == EventType.ATTRIBUTE_UPDATED:
             # data is tuple[node_id, attribute_path, new_value]
             node_id, attribute_path, new_value = msg.data
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(
+                    "Attribute updated: Node: %s - Attribute: %s - New value: %s",
+                    node_id,
+                    attribute_path,
+                    new_value,
+                )
             self._nodes[node_id].update_attribute(attribute_path, new_value)
             self._signal_event(
                 EventType.ATTRIBUTE_UPDATED,
@@ -408,7 +483,26 @@ class MatterClient:
                 attribute_path=attribute_path,
             )
             return
-        # TODO: handle any other events ?
+        if msg.event == EventType.ENDPOINT_ADDED:
+            node_id = msg.data["node_id"]
+            endpoint_id = msg.data["endpoint_id"]
+            self.logger.debug("Endpoint added: %s/%s", node_id, endpoint_id)
+        if msg.event == EventType.NODE_EVENT:
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(
+                    "Node event: %s",
+                    msg.data,
+                )
+            node_event = dataclass_from_dict(MatterNodeEvent, msg.data)
+            self._signal_event(
+                EventType.NODE_EVENT,
+                data=node_event,
+                node_id=node_event.node_id,
+            )
+            return
+        # simply forward all other events as-is
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug("Received event: %s", msg)
         self._signal_event(msg.event, msg.data)
 
     def _signal_event(

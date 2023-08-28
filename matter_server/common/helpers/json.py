@@ -5,6 +5,7 @@ from dataclasses import is_dataclass
 from typing import Any
 
 from chip.clusters.Types import Nullable
+from chip.tlv import float32, uint
 import orjson
 
 from .util import dataclass_to_dict
@@ -22,8 +23,10 @@ def json_encoder_default(obj: Any) -> Any:
         return None
     if isinstance(obj, (set, tuple)):
         return list(obj)
-    if isinstance(obj, float):
+    if isinstance(obj, float32):
         return float(obj)
+    if isinstance(obj, uint):
+        return int(obj)
     if hasattr(obj, "as_dict"):
         return obj.as_dict()
     if is_dataclass(obj):
@@ -34,7 +37,7 @@ def json_encoder_default(obj: Any) -> Any:
         return b64encode(obj).decode("utf-8")
     if isinstance(obj, Exception):
         return str(obj)
-    if type(obj) == type:
+    if type(obj) == type:  # pylint: disable=unidiomatic-typecheck
         return f"{obj.__module__}.{obj.__qualname__}"
 
     raise TypeError
