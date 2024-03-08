@@ -1,4 +1,5 @@
 """Matter Client implementation."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,19 +10,28 @@ import uuid
 
 from aiohttp import ClientSession
 from chip.clusters import Objects as Clusters
+from chip.clusters.Types import NullValue
 
 from matter_server.common.errors import ERROR_MAP, NodeNotExists
 
-from ..common.helpers.util import dataclass_from_dict, dataclass_to_dict
+from ..common.helpers.util import (
+    convert_ip_address,
+    convert_mac_address,
+    dataclass_from_dict,
+    dataclass_to_dict,
+)
 from ..common.models import (
     APICommand,
     CommandMessage,
+    CommissionableNodeData,
+    CommissioningParameters,
     ErrorResultMessage,
     EventMessage,
     EventType,
     MatterNodeData,
     MatterNodeEvent,
     MessageType,
+    NodePingResult,
     ResultMessageBase,
     ServerDiagnostics,
     ServerInfoMessage,
@@ -29,14 +39,20 @@ from ..common.models import (
 )
 from .connection import MatterClientConnection
 from .exceptions import ConnectionClosed, InvalidServerVersion, InvalidState
-from .models.node import MatterFabricData, MatterNode
+from .models.node import (
+    MatterFabricData,
+    MatterNode,
+    NetworkType,
+    NodeDiagnostics,
+    NodeType,
+)
 
 if TYPE_CHECKING:
     from chip.clusters.Objects import ClusterCommand
 
 SUB_WILDCARD: Final = "*"
 
-# pylint: disable=too-many-public-methods
+# pylint: disable=too-many-public-methods,too-many-locals,too-many-branches
 
 
 class MatterClient:
@@ -111,23 +127,41 @@ class MatterClient:
             return node
         raise NodeNotExists(f"Node {node_id} does not exist or is not yet interviewed")
 
-    async def commission_with_code(self, code: str) -> MatterNodeData:
+    async def commission_with_code(
+        self, code: str, network_only: bool = False
+    ) -> MatterNodeData:
         """
-        Commission a device using QRCode or ManualPairingCode.
+        Commission a device using a QR Code or Manual Pairing Code.
 
-        Returns basic MatterNodeData once complete.
+        :param code: The QR Code or Manual Pairing Code for device commissioning.
+        :param network_only: If True, restricts device discovery to network only.
+
+        :return: The NodeInfo of the commissioned device.
         """
-        data = await self.send_command(APICommand.COMMISSION_WITH_CODE, code=code)
+        data = await self.send_command(
+            APICommand.COMMISSION_WITH_CODE,
+            require_schema=6 if network_only else None,
+            code=code,
+            network_only=network_only,
+        )
         return dataclass_from_dict(MatterNodeData, data)
 
-    async def commission_on_network(self, setup_pin_code: int) -> MatterNodeData:
+    async def commission_on_network(
+        self, setup_pin_code: int, ip_addr: str | None = None
+    ) -> MatterNodeData:
         """
-        Commission a device already connected to the network.
+        Do the routine for OnNetworkCommissioning.
+
+        NOTE: For advanced usecases only, use `commission_with_code`
+        for regular commissioning.
 
         Returns basic MatterNodeData once complete.
         """
         data = await self.send_command(
-            APICommand.COMMISSION_ON_NETWORK, setup_pin_code=setup_pin_code
+            APICommand.COMMISSION_ON_NETWORK,
+            require_schema=6 if ip_addr is not None else None,
+            setup_pin_code=setup_pin_code,
+            ip_addr=ip_addr,
         )
         return dataclass_from_dict(MatterNodeData, data)
 
@@ -148,14 +182,14 @@ class MatterClient:
         iteration: int = 1000,
         option: int = 1,
         discriminator: Optional[int] = None,
-    ) -> tuple[int, str]:
+    ) -> CommissioningParameters:
         """
         Open a commissioning window to commission a device present on this controller to another.
 
         Returns code to use as discriminator.
         """
-        return cast(
-            tuple[int, str],
+        return dataclass_from_dict(
+            CommissioningParameters,
             await self.send_command(
                 APICommand.OPEN_COMMISSIONING_WINDOW,
                 node_id=node_id,
@@ -166,6 +200,15 @@ class MatterClient:
             ),
         )
 
+    async def discover_commissionable_nodes(
+        self,
+    ) -> list[CommissionableNodeData]:
+        """Discover Commissionable Nodes (discovered on BLE or mDNS)."""
+        return [
+            dataclass_from_dict(CommissionableNodeData, x)
+            for x in await self.send_command(APICommand.DISCOVER, require_schema=7)
+        ]
+
     async def get_matter_fabrics(self, node_id: int) -> list[MatterFabricData]:
         """
         Get Matter fabrics from a device.
@@ -175,7 +218,7 @@ class MatterClient:
 
         node = self.get_node(node_id)
         fabrics: list[
-            Clusters.OperationalCredentials.Structs.FabricDescriptor
+            Clusters.OperationalCredentials.Structs.FabricDescriptorStruct
         ] = node.get_attribute_value(
             0, None, Clusters.OperationalCredentials.Attributes.Fabrics
         )
@@ -183,16 +226,16 @@ class MatterClient:
         vendors_map = await self.send_command(
             APICommand.GET_VENDOR_NAMES,
             require_schema=3,
-            filter_vendors=[f.vendorId for f in fabrics],
+            filter_vendors=[f.vendorID for f in fabrics],
         )
 
         return [
             MatterFabricData(
-                fabric_id=f.fabricId,
-                vendor_id=f.vendorId,
+                fabric_id=f.fabricID,
+                vendor_id=f.vendorID,
                 fabric_index=f.fabricIndex,
                 fabric_label=f.label if f.label else None,
-                vendor_name=vendors_map.get(str(f.vendorId)),
+                vendor_name=vendors_map.get(str(f.vendorID)),
             )
             for f in fabrics
         ]
@@ -205,6 +248,170 @@ class MatterClient:
             Clusters.OperationalCredentials.Commands.RemoveFabric(
                 fabricIndex=fabric_index,
             ),
+        )
+
+    async def ping_node(self, node_id: int) -> NodePingResult:
+        """Ping node on the currently known IP-adress(es)."""
+        return cast(
+            NodePingResult,
+            await self.send_command(APICommand.PING_NODE, node_id=node_id),
+        )
+
+    async def get_node_ip_addresses(
+        self, node_id: int, prefer_cache: bool = True, scoped: bool = False
+    ) -> list[str]:
+        """Return the currently known (scoped) IP-adress(es)."""
+        if TYPE_CHECKING:
+            assert self.server_info is not None
+        if self.server_info.schema_version >= 8:
+            return cast(
+                list[str],
+                await self.send_command(
+                    APICommand.GET_NODE_IP_ADRESSES,
+                    require_schema=8,
+                    node_id=node_id,
+                    prefer_cache=prefer_cache,
+                    scoped=scoped,
+                ),
+            )
+        # alternative method of fetching ip addresses by enumerating NetworkInterfaces
+        node = self.get_node(node_id)
+        attribute = Clusters.GeneralDiagnostics.Attributes.NetworkInterfaces
+        network_interface: Clusters.GeneralDiagnostics.Structs.NetworkInterface
+        ip_addresses: list[str] = []
+        for network_interface in node.get_attribute_value(
+            0, cluster=None, attribute=attribute
+        ):
+            # ignore invalid/non-operational interfaces
+            if not network_interface.isOperational:
+                continue
+            # enumerate ipv4 and ipv6 addresses
+            for ipv4_address_hex in network_interface.IPv4Addresses:
+                ipv4_address = convert_ip_address(ipv4_address_hex)
+                ip_addresses.append(ipv4_address)
+            for ipv6_address_hex in network_interface.IPv6Addresses:
+                ipv6_address = convert_ip_address(ipv6_address_hex, True)
+                ip_addresses.append(ipv6_address)
+            break
+        return ip_addresses
+
+    async def node_diagnostics(self, node_id: int) -> NodeDiagnostics:
+        """Gather diagnostics for the given node."""
+        # pylint: disable=too-many-statements
+        node = self.get_node(node_id)
+        ip_addresses = await self.get_node_ip_addresses(node_id)
+        # grab some details from the first (operational) network interface
+        network_type = NetworkType.UNKNOWN
+        mac_address = None
+        attribute = Clusters.GeneralDiagnostics.Attributes.NetworkInterfaces
+        network_interface: Clusters.GeneralDiagnostics.Structs.NetworkInterface
+        for network_interface in node.get_attribute_value(
+            0, cluster=None, attribute=attribute
+        ):
+            # ignore invalid/non-operational interfaces
+            if not network_interface.isOperational:
+                continue
+            if (
+                network_interface.type
+                == Clusters.GeneralDiagnostics.Enums.InterfaceTypeEnum.kThread
+            ):
+                network_type = NetworkType.THREAD
+            elif (
+                network_interface.type
+                == Clusters.GeneralDiagnostics.Enums.InterfaceTypeEnum.kWiFi
+            ):
+                network_type = NetworkType.WIFI
+            elif (
+                network_interface.type
+                == Clusters.GeneralDiagnostics.Enums.InterfaceTypeEnum.kEthernet
+            ):
+                network_type = NetworkType.ETHERNET
+            else:
+                # unknown interface: ignore
+                continue
+            mac_address = convert_mac_address(network_interface.hardwareAddress)
+            break
+        # get thread/wifi specific info
+        node_type = NodeType.UNKNOWN
+        network_name = None
+        if network_type == NetworkType.THREAD:
+            thread_cluster: Clusters.ThreadNetworkDiagnostics = node.get_cluster(
+                0, Clusters.ThreadNetworkDiagnostics
+            )
+            if isinstance(thread_cluster.networkName, bytes):
+                network_name = thread_cluster.networkName.decode("utf-8")
+            elif thread_cluster.networkName != NullValue:
+                network_name = thread_cluster.networkName
+            # parse routing role to (diagnostics) node type
+            if (
+                thread_cluster.routingRole
+                == Clusters.ThreadNetworkDiagnostics.Enums.RoutingRoleEnum.kSleepyEndDevice
+            ):
+                node_type = NodeType.SLEEPY_END_DEVICE
+            if thread_cluster.routingRole in (
+                Clusters.ThreadNetworkDiagnostics.Enums.RoutingRoleEnum.kLeader,
+                Clusters.ThreadNetworkDiagnostics.Enums.RoutingRoleEnum.kRouter,
+            ):
+                node_type = NodeType.ROUTING_END_DEVICE
+            elif (
+                thread_cluster.routingRole
+                == Clusters.ThreadNetworkDiagnostics.Enums.RoutingRoleEnum.kEndDevice
+            ):
+                node_type = NodeType.END_DEVICE
+        elif network_type == NetworkType.WIFI:
+            node_type = NodeType.END_DEVICE
+        # use lastNetworkID from NetworkCommissioning cluster as fallback to get the network name
+        # this allows getting the SSID as the wifi diagnostics cluster only has the BSSID
+        last_network_id: bytes | str | None
+        if not network_name and (
+            last_network_id := node.get_attribute_value(
+                0,
+                cluster=None,
+                attribute=Clusters.NetworkCommissioning.Attributes.LastNetworkID,
+            )
+        ):
+            if isinstance(last_network_id, bytes):
+                network_name = last_network_id.decode("utf-8")
+            elif last_network_id != NullValue:
+                network_name = last_network_id
+        # last resort to get the (wifi) networkname;
+        # enumerate networks on the NetworkCommissioning cluster
+        networks: list[Clusters.NetworkCommissioning.Structs.NetworkInfoStruct]
+        if not network_name and (
+            networks := node.get_attribute_value(
+                0,
+                cluster=None,
+                attribute=Clusters.NetworkCommissioning.Attributes.Networks,
+            )
+        ):
+            for network in networks:
+                if not network.connected:
+                    continue
+                if isinstance(network.networkID, bytes):
+                    network_name = network.networkID.decode("utf-8")
+                    break
+                if network.networkID != NullValue:
+                    network_name = network.networkID
+                    break
+        # override node type if node is a bridge
+        if node.node_data.is_bridge:
+            node_type = NodeType.BRIDGE
+        # get active fabrics for this node
+        active_fabrics = await self.get_matter_fabrics(node_id)
+        # get active fabric index
+        fabric_index = node.get_attribute_value(
+            0, None, Clusters.OperationalCredentials.Attributes.CurrentFabricIndex
+        )
+        return NodeDiagnostics(
+            node_id=node_id,
+            network_type=network_type,
+            node_type=node_type,
+            network_name=network_name,
+            ip_adresses=ip_addresses,
+            mac_address=mac_address,
+            available=node.available,
+            active_fabrics=active_fabrics,
+            active_fabric_index=fabric_index,
         )
 
     async def send_device_command(
@@ -238,14 +445,28 @@ class MatterClient:
         self,
         node_id: int,
         attribute_path: str,
-    ) -> Any:
-        """Read a single attribute on a node."""
-        return await self.send_command(
+    ) -> dict[str, Any]:
+        """Read one or more attribute(s) on a node by specifying an attributepath."""
+        updated_values = await self.send_command(
             APICommand.READ_ATTRIBUTE,
             require_schema=4,
             node_id=node_id,
             attribute_path=attribute_path,
         )
+        if not isinstance(updated_values, dict):
+            # can happen is the server is running schema < 8
+            return {attribute_path: updated_values}
+        return cast(dict[str, Any], updated_values)
+
+    async def refresh_attribute(
+        self,
+        node_id: int,
+        attribute_path: str,
+    ) -> None:
+        """Read attribute(s) on a node and store the updated value(s)."""
+        updated_values = await self.read_attribute(node_id, attribute_path)
+        for attr_path, value in updated_values.items():
+            self._nodes[node_id].update_attribute(attr_path, value)
 
     async def write_attribute(
         self,
@@ -265,6 +486,10 @@ class MatterClient:
     async def remove_node(self, node_id: int) -> None:
         """Remove a Matter node/device from the fabric."""
         await self.send_command(APICommand.REMOVE_NODE, node_id=node_id)
+
+    async def interview_node(self, node_id: int) -> None:
+        """Interview a node."""
+        await self.send_command(APICommand.INTERVIEW_NODE, node_id=node_id)
 
     async def subscribe_attribute(
         self, node_id: int, attribute_path: str | list[str]

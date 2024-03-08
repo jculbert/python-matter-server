@@ -1,12 +1,20 @@
 """Implementation of a Websocket-based server to proxy Matter support (using CHIP SDK)."""
+
 from __future__ import annotations
 
 import asyncio
+from functools import partial
+import ipaddress
 import logging
-from typing import Any, Callable, Set
+import os
+from pathlib import Path
+import traceback
+from typing import TYPE_CHECKING, Any, Callable, Set, cast
 import weakref
 
 from aiohttp import web
+
+from matter_server.server.helpers.custom_web_runner import MultiHostTCPSite
 
 from ..common.const import SCHEMA_VERSION
 from ..common.errors import VersionMismatch
@@ -26,6 +34,33 @@ from .device_controller import MatterDeviceController
 from .stack import MatterStack
 from .storage import StorageController
 from .vendor_info import VendorInfo
+
+DASHBOARD_DIR = Path(__file__).parent.joinpath("../dashboard/").resolve()
+DASHBOARD_DIR_EXISTS = DASHBOARD_DIR.exists()
+
+
+def _global_loop_exception_handler(_: Any, context: dict[str, Any]) -> None:
+    """Handle all exception inside the core loop."""
+    kwargs = {}
+    if exception := context.get("exception"):
+        kwargs["exc_info"] = (type(exception), exception, exception.__traceback__)
+
+    logger = logging.getLogger(__package__)
+    if source_traceback := context.get("source_traceback"):
+        stack_summary = "".join(traceback.format_list(source_traceback))
+        logger.error(
+            "Error doing job: %s: %s",
+            context["message"],
+            stack_summary,
+            **kwargs,  # type: ignore[arg-type]
+        )
+        return
+
+    logger.error(
+        "Error doing task: %s",
+        context["message"],
+        **kwargs,  # type: ignore[arg-type]
+    )
 
 
 def mount_websocket(server: MatterServer, path: str) -> None:
@@ -52,8 +87,10 @@ def mount_websocket(server: MatterServer, path: str) -> None:
 class MatterServer:
     """Serve Matter stack over WebSockets."""
 
+    # pylint: disable=too-many-instance-attributes
+
     _runner: web.AppRunner | None = None
-    _http: web.TCPSite | None = None
+    _http: MultiHostTCPSite | None = None
 
     def __init__(
         self,
@@ -61,12 +98,16 @@ class MatterServer:
         vendor_id: int,
         fabric_id: int,
         port: int,
+        listen_addresses: list[str] | None = None,
+        primary_interface: str | None = None,
     ) -> None:
         """Initialize the Matter Server."""
         self.storage_path = storage_path
         self.vendor_id = vendor_id
         self.fabric_id = fabric_id
         self.port = port
+        self.listen_addresses = listen_addresses
+        self.primary_interface = primary_interface
         self.logger = logging.getLogger(__name__)
         self.app = web.Application()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -91,16 +132,35 @@ class MatterServer:
                 "CHIP Core version does not match CHIP Clusters version."
             )
         self.loop = asyncio.get_running_loop()
+        self.loop.set_exception_handler(_global_loop_exception_handler)
+        self.loop.set_debug(os.environ.get("PYTHONDEBUG", "") != "")
         await self.device_controller.initialize()
         await self.storage.start()
         await self.device_controller.start()
         await self.vendor_info.start()
         mount_websocket(self, "/ws")
-        self.app.router.add_route("GET", "/", self._handle_info)
+        self.app.router.add_route("GET", "/info", self._handle_info)
+
+        # Host dashboard if the prebuilt files are detected
+        if DASHBOARD_DIR_EXISTS:
+            dashboard_dir = str(DASHBOARD_DIR)
+            self.logger.debug("Detected dashboard files on %s", dashboard_dir)
+            for abs_dir, _, files in os.walk(dashboard_dir):
+                rel_dir = abs_dir.replace(dashboard_dir, "")
+                for filename in files:
+                    filepath = os.path.join(abs_dir, filename)
+                    handler = partial(self._serve_static, filepath)
+                    if rel_dir == "" and filename == "index.html":
+                        route_path = "/"
+                    else:
+                        route_path = f"{rel_dir}/{filename}"
+                    self.app.router.add_route("GET", route_path, handler)
+
         self._runner = web.AppRunner(self.app, access_log=None)
         await self._runner.setup()
-        # set host to None to bind to all addresses on both IPv4 and IPv6
-        self._http = web.TCPSite(self._runner, host=None, port=self.port)
+        self._http = MultiHostTCPSite(
+            self._runner, host=self.listen_addresses, port=self.port
+        )
         await self._http.start()
         self.logger.debug("Webserver initialized.")
 
@@ -160,11 +220,41 @@ class MatterServer:
 
     def signal_event(self, evt: EventType, data: Any = None) -> None:
         """Signal event to listeners."""
+        if TYPE_CHECKING:
+            assert self.loop
         for callback in self._subscribers:
             if asyncio.iscoroutinefunction(callback):
                 asyncio.create_task(callback(evt, data))
             else:
-                callback(evt, data)
+                self.loop.call_soon_threadsafe(callback, evt, data)
+
+    def scope_ipv6_lla(self, ip_addr: str) -> str:
+        """Scope IPv6 link-local addresses to primary interface.
+
+        IPv6 link-local addresses received through the websocket might have no
+        scope_id or a scope_id which isn't valid on this device. Just assume the
+        device is connected on the primary interface.
+        """
+        ip_addr_parsed = ipaddress.ip_address(ip_addr)
+        if not ip_addr_parsed.is_link_local or ip_addr_parsed.version != 6:
+            return ip_addr
+
+        ip_addr_parsed = cast(ipaddress.IPv6Address, ip_addr_parsed)
+
+        if ip_addr_parsed.scope_id is not None:
+            # This type of IPv6 manipulation is not supported by the ipaddress lib
+            ip_addr = ip_addr.split("%")[0]
+
+        # Rely on host OS routing table
+        if self.primary_interface is None:
+            return ip_addr
+
+        self.logger.debug(
+            "Setting scope of link-local IP address %s to %s",
+            ip_addr,
+            self.primary_interface,
+        )
+        return f"{ip_addr}%{self.primary_interface}"
 
     def register_api_command(
         self,
@@ -194,3 +284,10 @@ class MatterServer:
         """Handle info endpoint to serve basic server (version) info."""
         # pylint: disable=unused-argument
         return web.json_response(self.get_info(), dumps=json_dumps)
+
+    async def _serve_static(
+        self, file_path: str, _request: web.Request
+    ) -> web.FileResponse:
+        """Serve file response."""
+        headers = {"Cache-Control": "no-cache"}
+        return web.FileResponse(file_path, headers=headers)

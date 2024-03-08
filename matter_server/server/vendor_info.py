@@ -1,4 +1,5 @@
 """Fetches vendor info from the CSA."""
+
 from __future__ import annotations
 
 import logging
@@ -18,12 +19,35 @@ PRODUCTION_URL = "https://on.dcl.csa-iot.org"
 DATA_KEY_VENDOR_INFO = "vendor_info"
 
 
+TEST_VENDOR = VendorInfoModel(
+    vendor_id=65521,
+    vendor_name="Test",
+    company_legal_name="Test",
+    company_preferred_name="Test",
+    vendor_landing_page_url="https://csa-iot.org",
+    creator="",
+)
+NABUCASA_VENDOR = VendorInfoModel(
+    vendor_id=4939,
+    vendor_name="Nabu Casa",
+    company_legal_name="Nabu Casa Inc.",
+    company_preferred_name="Nabu Casa",
+    vendor_landing_page_url="https://nabucasa.com/",
+    creator="",
+)
+
+
 class VendorInfo:
     """Fetches vendor info from the CSA and handles api calls to get it."""
 
     def __init__(self, server: MatterServer):
         """Initialize the vendor info."""
-        self._data: dict[int, VendorInfoModel] = {}
+        self._data: dict[int, VendorInfoModel] = {
+            # add test vendor ID
+            TEST_VENDOR.vendor_id: TEST_VENDOR,
+            # add nabucasa vendor while we're not yet certified
+            NABUCASA_VENDOR.vendor_id: NABUCASA_VENDOR,
+        }
         self._server = server
 
     async def start(self) -> None:
@@ -48,19 +72,27 @@ class VendorInfo:
         vendors: dict[int, VendorInfoModel] = {}
         try:
             async with ClientSession(raise_for_status=True) as session:
-                async with session.get(
-                    f"{PRODUCTION_URL}/dcl/vendorinfo/vendors"
-                ) as response:
-                    data = await response.json()
-                    for vendorinfo in data["vendorInfo"]:
-                        vendors[vendorinfo["vendorID"]] = VendorInfoModel(
-                            vendor_id=vendorinfo["vendorID"],
-                            vendor_name=vendorinfo["vendorName"],
-                            company_legal_name=vendorinfo["companyLegalName"],
-                            company_preferred_name=vendorinfo["companyPreferredName"],
-                            vendor_landing_page_url=vendorinfo["vendorLandingPageURL"],
-                            creator=vendorinfo["creator"],
-                        )
+                page_token: str | None = ""
+                while page_token is not None:
+                    async with session.get(
+                        f"{PRODUCTION_URL}/dcl/vendorinfo/vendors",
+                        params={"pagination.key": page_token},
+                    ) as response:
+                        data = await response.json()
+                        for vendorinfo in data["vendorInfo"]:
+                            vendors[vendorinfo["vendorID"]] = VendorInfoModel(
+                                vendor_id=vendorinfo["vendorID"],
+                                vendor_name=vendorinfo["vendorName"],
+                                company_legal_name=vendorinfo["companyLegalName"],
+                                company_preferred_name=vendorinfo[
+                                    "companyPreferredName"
+                                ],
+                                vendor_landing_page_url=vendorinfo[
+                                    "vendorLandingPageURL"
+                                ],
+                                creator=vendorinfo["creator"],
+                            )
+                    page_token = data.get("pagination", {}).get("next_key", None)
         except ClientError as err:
             LOGGER.error("Unable to fetch vendor info from DCL: %s", err)
         else:

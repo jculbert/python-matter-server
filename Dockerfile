@@ -10,13 +10,14 @@ RUN \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         libuv1 \
-        openssl \
         zlib1g \
         libjson-c5 \
         libnl-3-200 \
         libnl-route-3-200 \
         unzip \
         gdb \
+        iputils-ping \
+        iproute2 \
     && apt-get purge -y --auto-remove \
     && rm -rf \
         /var/lib/apt/lists/* \

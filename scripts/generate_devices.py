@@ -1,4 +1,5 @@
 """Generate device types from matter-devices.xml."""
+
 import pathlib
 
 import black
@@ -27,6 +28,8 @@ def gen_cls_name(name: str):
     for char in name:
         if char in ("-", "/"):
             next_upper = True
+            continue
+        elif char in ("."):
             continue
         elif next_upper:
             char = char.upper()
@@ -69,6 +72,10 @@ class DeviceType:
         super().__init_subclass__(**kwargs)
         cls.device_type = device_type
         ALL_TYPES[device_type] = cls
+
+    def __hash__(self) -> int:
+        """Return unique hash for this object."""
+        return self.device_type
 
 '''
     ]

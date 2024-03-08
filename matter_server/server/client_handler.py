@@ -1,4 +1,5 @@
 """Logic to handle a client connected over WebSockets."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +15,7 @@ from chip.exceptions import ChipStackError
 from matter_server.common.helpers.json import json_dumps, json_loads
 from matter_server.common.models import EventType
 
-from ..common.errors import InvalidArguments, InvalidCommand, MatterError, SDKStackError
+from ..common.errors import InvalidArguments, InvalidCommand, MatterError
 from ..common.helpers.api import parse_arguments
 from ..common.helpers.util import dataclass_from_dict
 from ..common.models import (
@@ -67,7 +68,7 @@ class WebsocketClientHandler:
 
     async def handle_client(self) -> web.WebSocketResponse:
         """Handle a websocket response."""
-        # pylint: disable=too-many-branches
+        # pylint: disable=too-many-branches,too-many-statements
         request = self.request
         wsock = self.wsock
         try:
@@ -91,12 +92,16 @@ class WebsocketClientHandler:
             while not wsock.closed:
                 msg = await wsock.receive()
 
-                if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING):
+                if msg.type in (WSMsgType.CLOSED, WSMsgType.CLOSE, WSMsgType.CLOSING):
+                    break
+
+                if msg.type == WSMsgType.ERROR:
+                    disconnect_warn = f"Received error message: {msg.data}"
                     break
 
                 if msg.type != WSMsgType.TEXT:
-                    disconnect_warn = "Received non-Text message."
-                    break
+                    self._logger.warning("Received non-Text message: %s", msg.data)
+                    continue
 
                 self._logger.debug("Received: %s", msg.data)
 
@@ -187,14 +192,22 @@ class WebsocketClientHandler:
             if asyncio.iscoroutine(result):
                 result = await result
             self._send_message(SuccessResultMessage(msg.message_id, result))
-        except ChipStackError as err:
-            self._send_message(
-                ErrorResultMessage(msg.message_id, SDKStackError.error_code, str(err))
-            )
-        except Exception as err:  # pylint: disable=broad-except
-            self._logger.exception("Error handling message: %s", msg)
+        except (ChipStackError, MatterError) as err:
             error_code = getattr(err, "error_code", MatterError.error_code)
+            message_str = msg.command
+            if msg.args and (node_id := msg.args.get("node_id")):
+                message_str += f" (node {node_id})"
+            self._logger.error(
+                "Error while handling: %s: %s",
+                message_str,
+                str(err) or err.__class__.__name__,
+                # only print the full stacktrace if debug logging is enabled
+                exc_info=err if self._logger.isEnabledFor(logging.DEBUG) else None,
+            )
             self._send_message(ErrorResultMessage(msg.message_id, error_code, str(err)))
+        except Exception as err:
+            self._send_message(ErrorResultMessage(msg.message_id, 0, str(err)))
+            raise err
 
     async def _writer(self) -> None:
         """Write outgoing messages."""

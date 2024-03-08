@@ -8,6 +8,7 @@ All rights reserved.
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 import logging
 from os import makedirs
 import re
@@ -18,14 +19,17 @@ from cryptography.hazmat.primitives import serialization
 
 from matter_server.server.const import PAA_ROOT_CERTS_DIR
 
+# Git repo details
+OWNER = "project-chip"
+REPO = "connectedhomeip"
+PATH = "credentials/development/paa-root-certs"
+
 LOGGER = logging.getLogger(__name__)
 PRODUCTION_URL = "https://on.dcl.csa-iot.org"
 TEST_URL = "https://on.test-net.dcl.csa-iot.org"
-GIT_URL = "https://github.com/project-chip/connectedhomeip/raw/master/credentials/development/paa-root-certs"  # pylint: disable=line-too-long
-GIT_CERTS = [
-    "Chip-Test-PAA-FFF1-Cert",
-    "Chip-Test-PAA-NoVID-Cert",
-]
+GIT_URL = f"https://raw.githubusercontent.com/{OWNER}/{REPO}/master/{PATH}"
+
+
 LAST_CERT_IDS: set[str] = set()
 
 
@@ -59,20 +63,17 @@ async def fetch_dcl_certificates(
 ) -> int:
     """Fetch DCL PAA Certificates."""
     LOGGER.info("Fetching the latest PAA root certificates from DCL.")
-    if not PAA_ROOT_CERTS_DIR.is_dir():
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, makedirs, PAA_ROOT_CERTS_DIR)
     fetch_count: int = 0
     base_urls = set()
     # determine which url's need to be queried.
     # if we're going to fetch both prod and test, do test first
-    # so any duplicates will be overwritten/preferred by the production version
+    # so any duplicates will be overwritten/preferred by the production version.
+
     # NOTE: While Matter is in BETA we fetch the test certificates by default
     if fetch_test_certificates:
         base_urls.add(TEST_URL)
     if fetch_production_certificates:
         base_urls.add(PRODUCTION_URL)
-
     try:
         async with ClientSession(raise_for_status=True) as http_session:
             for url_base in base_urls:
@@ -103,7 +104,7 @@ async def fetch_dcl_certificates(
                     )
                     LAST_CERT_IDS.add(paa["subjectKeyId"])
                     fetch_count += 1
-    except ClientError as err:
+    except (ClientError, TimeoutError) as err:
         LOGGER.warning(
             "Fetching latest certificates failed: error %s", err, exc_info=err
         )
@@ -113,22 +114,33 @@ async def fetch_dcl_certificates(
     return fetch_count
 
 
+# Manufacturers release test certificates through the SDK (Git) as a part
+# of their standard product release workflow. This will ensure those certs
+# are correctly captured
+
+
 async def fetch_git_certificates() -> int:
     """Fetch Git PAA Certificates."""
     fetch_count = 0
     LOGGER.info("Fetching the latest PAA root certificates from Git.")
+
     try:
         async with ClientSession(raise_for_status=True) as http_session:
-            for cert in GIT_CERTS:
+            # Fetch directory contents and filter out extension
+            api_url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{PATH}"
+            async with http_session.get(api_url, timeout=20) as response:
+                contents = await response.json()
+                git_certs = {item["name"].split(".")[0] for item in contents}
+            # Fetch certificates
+            for cert in git_certs:
                 if cert in LAST_CERT_IDS:
                     continue
-
                 async with http_session.get(f"{GIT_URL}/{cert}.pem") as response:
                     certificate = await response.text()
                 await write_paa_root_cert(certificate, cert)
                 LAST_CERT_IDS.add(cert)
                 fetch_count += 1
-    except ClientError as err:
+    except (ClientError, TimeoutError) as err:
         LOGGER.warning(
             "Fetching latest certificates failed: error %s", err, exc_info=err
         )
@@ -138,11 +150,30 @@ async def fetch_git_certificates() -> int:
     return fetch_count
 
 
+async def _get_certificate_age() -> datetime:
+    """Get last time PAA Certificates have been fetched."""
+    loop = asyncio.get_running_loop()
+    stat = await loop.run_in_executor(None, PAA_ROOT_CERTS_DIR.stat)
+    return datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+
+
 async def fetch_certificates(
     fetch_test_certificates: bool = True,
     fetch_production_certificates: bool = True,
 ) -> int:
     """Fetch PAA Certificates."""
+    loop = asyncio.get_running_loop()
+
+    if not PAA_ROOT_CERTS_DIR.is_dir():
+        await loop.run_in_executor(None, makedirs, PAA_ROOT_CERTS_DIR)
+    else:
+        stat = await loop.run_in_executor(None, PAA_ROOT_CERTS_DIR.stat)
+        last_fetch = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+        if last_fetch > datetime.now(tz=UTC) - timedelta(days=1):
+            LOGGER.info(
+                "Skip fetching certificates (already fetched within the last 24h)."
+            )
+            return 0
 
     fetch_count = await fetch_dcl_certificates(
         fetch_test_certificates=fetch_test_certificates,
@@ -151,5 +182,7 @@ async def fetch_certificates(
 
     if fetch_test_certificates:
         fetch_count += await fetch_git_certificates()
+
+    await loop.run_in_executor(None, PAA_ROOT_CERTS_DIR.touch)
 
     return fetch_count

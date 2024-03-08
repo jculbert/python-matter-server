@@ -1,7 +1,9 @@
 """Matter node."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import logging
 from typing import Any, TypeVar, cast
 
@@ -79,7 +81,9 @@ class MatterEndpoint:
         return self.node.get_compose_parent(self.endpoint_id) is not None
 
     @property
-    def device_info(self) -> Clusters.BasicInformation | Clusters.BridgedDeviceBasic:
+    def device_info(
+        self,
+    ) -> Clusters.BasicInformation | Clusters.BridgedDeviceBasicInformation:
         """
         Return device info.
 
@@ -94,7 +98,11 @@ class MatterEndpoint:
         return self.node.device_info
 
     def has_cluster(self, cluster: type[_CLUSTER_T] | int) -> bool:
-        """Check if endpoint has a specific cluster."""
+        """
+        Check if endpoint has a specific cluster.
+
+        Provide the cluster to lookup either as the class/type or the id.
+        """
         if isinstance(cluster, type):
             return cluster.id in self.clusters
         return cluster in self.clusters
@@ -103,6 +111,7 @@ class MatterEndpoint:
         """
         Get a full Cluster object containing all attributes.
 
+        Provide the cluster to lookup either as the class/type or the id.
         Return None if the Cluster is not present on the node.
         """
         if isinstance(cluster, type):
@@ -113,12 +122,12 @@ class MatterEndpoint:
         self,
         cluster: type[_CLUSTER_T] | int | None,
         attribute: int | type[_ATTRIBUTE_T],
-    ) -> type[_ATTRIBUTE_T] | Clusters.ClusterAttributeDescriptor | None:
+    ) -> Any:
         """
         Return Matter Cluster Attribute object for given parameters.
 
-        Send cluster as None to derive it from the Attribute.,
-        you must provide the attribute as type/class in that case.
+        Either supply a cluster id and attribute id or omit cluster
+        and supply the Attribute class/type.
         """
         if cluster is None:
             # allow sending None for Cluster to auto resolve it from the Attribute
@@ -147,7 +156,12 @@ class MatterEndpoint:
         cluster: type[_CLUSTER_T] | int | None,
         attribute: int | type[_ATTRIBUTE_T],
     ) -> bool:
-        """Perform a quick check if the endpoint has a specific attribute."""
+        """
+        Perform a quick check if the endpoint has a specific attribute.
+
+        Either supply a cluster id and attribute id or omit cluster
+        and supply the Attribute class/type.
+        """
         if cluster is None:
             if isinstance(attribute, int):
                 raise TypeError("Attribute can not be integer if Cluster is omitted")
@@ -169,7 +183,16 @@ class MatterEndpoint:
         Do not modify the data directly from a consumer.
         """
         _, cluster_id, attribute_id = parse_attribute_path(attribute_path)
-        cluster_class: Clusters.Cluster = ALL_CLUSTERS[cluster_id]
+        if (
+            cluster_id not in ALL_CLUSTERS
+            or cluster_id not in ALL_ATTRIBUTES
+            or attribute_id not in ALL_ATTRIBUTES[cluster_id]
+        ):
+            # guard for unknown/custom clusters/attributes
+            return
+        assert cluster_id is not None  # for mypy
+        assert attribute_id is not None  # for mypy
+        cluster_class: type[Clusters.Cluster] = ALL_CLUSTERS[cluster_id]
         if cluster_id in self.clusters:
             cluster_instance = self.clusters[cluster_id]
         else:
@@ -177,7 +200,7 @@ class MatterEndpoint:
             self.clusters[cluster_id] = cluster_instance
 
         # unpack cluster attribute, using the descriptor
-        attribute_class: Clusters.ClusterAttributeDescriptor = ALL_ATTRIBUTES[
+        attribute_class: type[Clusters.ClusterAttributeDescriptor] = ALL_ATTRIBUTES[
             cluster_id
         ][attribute_id]
         attribute_name, attribute_type = get_object_params(
@@ -207,7 +230,7 @@ class MatterEndpoint:
 
     def __repr__(self) -> str:
         """Return the representation."""
-        return f"<MatterEndoint {self.endpoint_id} (node {self.node.node_id})>"
+        return f"<MatterEndpoint {self.endpoint_id} (node {self.node.node_id})>"
 
 
 class MatterNode:
@@ -342,3 +365,42 @@ class MatterNode:
     def __repr__(self) -> str:
         """Return the representation."""
         return f"<MatterNode {self.node_id}>"
+
+
+class NodeType(Enum):
+    """Custom Enum with Matter node types, used for diagnostics."""
+
+    END_DEVICE = "end_device"
+    SLEEPY_END_DEVICE = "sleepy_end_device"
+    ROUTING_END_DEVICE = "routing_end_device"
+    BRIDGE = "bridge"
+    UNKNOWN = "unknown"
+
+
+class NetworkType(Enum):
+    """Custom Enum with Matter network types used for diagnostics.."""
+
+    THREAD = "thread"
+    WIFI = "wifi"
+    ETHERNET = "ethernet"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class NodeDiagnostics:
+    """
+    Representation of a Node diagnostics message.
+
+    This a custom model intended to be (easily) consumed by Home Assistant
+    and constructed from various cluster attribute values.
+    """
+
+    node_id: int
+    network_type: NetworkType
+    node_type: NodeType
+    network_name: str | None  # WiFi SSID or Thread network name
+    ip_adresses: list[str]
+    mac_address: str | None
+    available: bool
+    active_fabrics: list[MatterFabricData]
+    active_fabric_index: int

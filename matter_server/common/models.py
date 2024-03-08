@@ -1,4 +1,5 @@
 """Models that are (serializeable) shared between server and client."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ class APICommand(str, Enum):
     SUBSCRIBE_ATTRIBUTE = "subscribe_attribute"
     READ_ATTRIBUTE = "read_attribute"
     WRITE_ATTRIBUTE = "write_attribute"
+    PING_NODE = "ping_node"
+    GET_NODE_IP_ADRESSES = "get_node_ip_addresses"
 
 
 EventCallBackType = Callable[[EventType, Any], None]
@@ -76,8 +79,8 @@ class MatterNodeData:
     attributes: dict[str, Any] = field(default_factory=dict)
     # all attribute subscriptions we need to persist for this node,
     # a set of tuples in format (endpoint_id, cluster_id, attribute_id)
-    # where each value can also be a '*' for wildcard
-    attribute_subscriptions: set[tuple[int | str, int | str, int | str]] = field(
+    # where each value can also be a None for wildcard
+    attribute_subscriptions: set[tuple[int | None, int | None, int | None]] = field(
         default_factory=set
     )
 
@@ -104,6 +107,9 @@ class ServerDiagnostics:
     info: ServerInfoMessage
     nodes: list[MatterNodeData]
     events: list[dict]
+
+
+NodePingResult = dict[str, bool]
 
 
 # API message models
@@ -168,3 +174,36 @@ MessageType = (
     | ErrorResultMessage
     | ServerInfoMessage
 )
+
+
+@dataclass
+class CommissionableNodeData:
+    """Object that is returned on the 'discover_commissionable_nodes' command."""
+
+    # pylint: disable=too-many-instance-attributes
+
+    instance_name: str | None = None
+    host_name: str | None = None
+    port: int | None = None
+    long_discriminator: int | None = None
+    vendor_id: int | None = None
+    product_id: int | None = None
+    commissioning_mode: int | None = None
+    device_type: int | None = None
+    device_name: str | None = None
+    pairing_instruction: str | None = None
+    pairing_hint: int | None = None
+    mrp_retry_interval_idle: int | None = None
+    mrp_retry_interval_active: int | None = None
+    supports_tcp: bool | None = None
+    addresses: list[str] | None = None
+    rotating_id: str | None = None
+
+
+@dataclass
+class CommissioningParameters:
+    """Object that is returned on the 'open_commisisoning_window' command."""
+
+    setup_pin_code: int
+    setup_manual_code: str
+    setup_qr_code: str

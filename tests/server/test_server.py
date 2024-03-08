@@ -1,4 +1,5 @@
 """Test the server."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Generator
@@ -13,7 +14,7 @@ from matter_server.server.server import MatterServer
 pytestmark = pytest.mark.usefixtures(
     "application",
     "app_runner",
-    "tcp_site",
+    "multi_host_tcp_site",
     "chip_native",
     "chip_logging",
     "chip_stack",
@@ -38,11 +39,13 @@ def app_runner_fixture() -> Generator[MagicMock, None, None]:
         yield app_runner
 
 
-@pytest.fixture(name="tcp_site")
-def tcp_site_fixture() -> Generator[MagicMock, None, None]:
+@pytest.fixture(name="multi_host_tcp_site")
+def multi_host_tcp_site_fixture() -> Generator[MagicMock, None, None]:
     """Return a mocked tcp site."""
-    with patch("matter_server.server.server.web.TCPSite", autospec=True) as tcp_site:
-        yield tcp_site
+    with patch(
+        "matter_server.server.server.MultiHostTCPSite", autospec=True
+    ) as multi_host_tcp_site:
+        yield multi_host_tcp_site
 
 
 @pytest.fixture(name="chip_native")
@@ -99,7 +102,7 @@ def fetch_certificates_fixture() -> Generator[MagicMock, None, None]:
 @pytest.fixture(name="server")
 async def server_fixture() -> AsyncGenerator[MatterServer, None]:
     """Yield a server."""
-    server = MatterServer("test_storage_path", 1234, 5678, 5580)
+    server = MatterServer("test_storage_path", 1234, 5678, 5580, None)
     await server.start()
     yield server
     await server.stop()
@@ -108,7 +111,7 @@ async def server_fixture() -> AsyncGenerator[MatterServer, None]:
 async def test_server_start(
     application: MagicMock,
     app_runner: MagicMock,
-    tcp_site: MagicMock,
+    multi_host_tcp_site: MagicMock,
     server: MatterServer,
     storage_controller: MagicMock,
 ) -> None:
@@ -116,20 +119,21 @@ async def test_server_start(
     assert application.call_count == 1
     application_instance = application.return_value
     add_route = application_instance.router.add_route
-    assert add_route.call_count == 2
+    assert add_route.call_count >= 2
     assert add_route.call_args_list[0][0][0] == "GET"
     assert add_route.call_args_list[0][0][1] == "/ws"
     assert add_route.call_args_list[1][0][0] == "GET"
-    assert add_route.call_args_list[1][0][1] == "/"
+    assert add_route.call_args_list[1][0][1] == "/info"
     assert app_runner.call_count == 1
     assert app_runner.return_value.setup.call_count == 1
-    assert tcp_site.call_count == 1
-    assert tcp_site.return_value.start.call_count == 1
+    assert multi_host_tcp_site.call_count == 1
+    assert multi_host_tcp_site.return_value.start.call_count == 1
     assert storage_controller.return_value.start.call_count == 1
     assert server.storage_path == "test_storage_path"
     assert server.vendor_id == 1234
     assert server.fabric_id == 5678
     assert server.port == 5580
+    assert server.listen_addresses is None
     assert APICommand.SERVER_INFO in server.command_handlers
     assert APICommand.SERVER_DIAGNOSTICS in server.command_handlers
     assert APICommand.GET_NODES in server.command_handlers
@@ -184,7 +188,7 @@ async def test_server_start(
             {"code": "test_code"},
             strict=True,
         )
-    ) == {"code": "test_code"}
+    ) == {"code": "test_code", "network_only": False}
     assert (
         parse_arguments(
             server.command_handlers[APICommand.COMMISSION_ON_NETWORK].signature,
@@ -192,7 +196,20 @@ async def test_server_start(
             {"setup_pin_code": 1234},
             strict=True,
         )
-    ) == {"setup_pin_code": 1234, "filter_type": 0, "filter": None}
+    ) == {"setup_pin_code": 1234, "filter_type": 0, "filter": None, "ip_addr": None}
+    assert (
+        parse_arguments(
+            server.command_handlers[APICommand.COMMISSION_ON_NETWORK].signature,
+            server.command_handlers[APICommand.COMMISSION_ON_NETWORK].type_hints,
+            {"setup_pin_code": 1234, "ip_addr": "fd82:c9e9:5cb7:1:2c5c:ed99:ecf:4460"},
+            strict=True,
+        )
+    ) == {
+        "setup_pin_code": 1234,
+        "filter_type": 0,
+        "filter": None,
+        "ip_addr": "fd82:c9e9:5cb7:1:2c5c:ed99:ecf:4460",
+    }
     assert (
         parse_arguments(
             server.command_handlers[APICommand.SET_WIFI_CREDENTIALS].signature,

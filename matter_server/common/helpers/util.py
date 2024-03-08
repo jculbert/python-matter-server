@@ -1,6 +1,8 @@
 """Utils for Matter server (and client)."""
+
 from __future__ import annotations
 
+import base64
 from base64 import b64decode
 import binascii
 from dataclasses import MISSING, asdict, fields, is_dataclass
@@ -10,18 +12,23 @@ from functools import cache
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 import logging
 import platform
+import socket
 from types import NoneType, UnionType
 from typing import (
     TYPE_CHECKING,
     Any,
     TypeVar,
     Union,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
 )
 
-from chip.clusters.ClusterObjects import ClusterAttributeDescriptor
+from chip.clusters.ClusterObjects import (
+    ClusterAttributeDescriptor,
+    ClusterObjectDescriptor,
+)
 from chip.clusters.Types import Nullable
 from chip.tlv import float32, uint
 
@@ -33,9 +40,12 @@ if TYPE_CHECKING:
 CHIP_CLUSTERS_PKG_NAME = "home-assistant-chip-clusters"
 CHIP_CORE_PKG_NAME = "home-assistant-chip-core"
 
+cached_fields = cache(fields)
+cached_type_hints = cache(get_type_hints)
+
 
 def create_attribute_path_from_attribute(
-    endpoint_id: int, attribute: ClusterAttributeDescriptor
+    endpoint_id: int, attribute: type[ClusterAttributeDescriptor]
 ) -> str:
     """Create path/identifier for an Attribute."""
     return create_attribute_path(
@@ -43,20 +53,27 @@ def create_attribute_path_from_attribute(
     )
 
 
-def create_attribute_path(endpoint: int, cluster_id: int, attribute_id: int) -> str:
+def create_attribute_path(
+    endpoint: int | None, cluster_id: int | None, attribute_id: int | None
+) -> str:
     """
-    Create path/identifier for an Attribute.
+    Create path/identifier string for an Attribute.
 
-    Returns same output as `Attribute.AttributePath`
+    Returns same output as `Attribute.AttributePath` string representation.
     endpoint/cluster_id/attribute_id
     """
     return f"{endpoint}/{cluster_id}/{attribute_id}"
 
 
-def parse_attribute_path(attribute_path: str) -> tuple[int, int, int]:
-    """Parse AttributePath string into endpoint_id, cluster_id, attribute_id."""
+def parse_attribute_path(
+    attribute_path: str,
+) -> tuple[int | None, int | None, int | None]:
+    """Parse AttributePath string into tuple of endpoint_id, cluster_id, attribute_id."""
     endpoint_id_str, cluster_id_str, attribute_id_str = attribute_path.split("/")
-    return (int(endpoint_id_str), int(cluster_id_str), int(attribute_id_str))
+    endpoint_id = int(endpoint_id_str) if endpoint_id_str.isnumeric() else None
+    cluster_id = int(cluster_id_str) if cluster_id_str.isnumeric() else None
+    attribute_id = int(attribute_id_str) if attribute_id_str.isnumeric() else None
+    return (endpoint_id, cluster_id, attribute_id)
 
 
 def dataclass_to_dict(obj_in: DataclassInstance) -> dict:
@@ -77,8 +94,27 @@ def parse_utc_timestamp(datetime_string: str) -> datetime:
     return datetime.fromisoformat(datetime_string.replace("Z", "+00:00"))
 
 
-def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) -> Any:
-    """Try to parse a value from raw (json) data and type annotations."""
+def _get_descriptor_key(descriptor: ClusterObjectDescriptor, key: str | int) -> str:
+    """Return correct Cluster attribute key for a tag id."""
+    if (isinstance(key, str) and key.isnumeric()) or isinstance(key, int):
+        if field := descriptor.GetFieldByTag(int(key)):
+            return cast(str, field.Label)
+    return cast(str, key)
+
+
+def parse_value(
+    name: str,
+    value: Any,
+    value_type: Any,
+    default: Any = MISSING,
+    allow_none: bool = True,
+    allow_sdk_types: bool = False,
+) -> Any:
+    """
+    Try to parse a value from raw (json) data and type annotations.
+
+    If allow_sdk_types is False, any SDK specific custom data types will be converted.
+    """
     # pylint: disable=too-many-return-statements,too-many-branches
 
     if isinstance(value_type, str):
@@ -86,9 +122,9 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
         value_type = get_type_hints(value_type, globals(), locals())
 
     if isinstance(value, dict):
-        # always prefer classes that have a from_dict
-        if hasattr(value_type, "from_dict"):
-            return value_type.from_dict(value)
+        if descriptor := getattr(value_type, "descriptor", None):
+            # handle matter TLV dicts where the keys are just tag identifiers
+            value = {_get_descriptor_key(descriptor, x): y for x, y in value.items()}
         # handle a parse error in the sdk which is returned as:
         # {'TLVValue': None, 'Reason': None} or {'TLVValue': None}
         if value.get("TLVValue", MISSING) is None:
@@ -101,6 +137,8 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
     if value is None and value_type is NoneType:
         return None
     if value is None and value_type is Nullable:
+        return Nullable() if allow_sdk_types else None
+    if value is None and allow_none:
         return None
     if is_dataclass(value_type) and isinstance(value, dict):
         return dataclass_from_dict(value_type, value)
@@ -152,7 +190,7 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
     if value_type is Any:
         return value
     # raise if value is None and the value is required according to annotations
-    if value is None and value_type is not NoneType:
+    if value is None and value_type is not NoneType and not allow_none:
         raise KeyError(f"`{name}` of type `{value_type}` is required.")
 
     try:
@@ -187,11 +225,12 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
     if value_type is uint and (
         isinstance(value, int) or (isinstance(value, str) and value.isnumeric())
     ):
-        return uint(value)
+        return uint(value) if allow_sdk_types else int(value)
     if value_type is float32 and (
-        isinstance(value, float) or (isinstance(value, str) and value.isnumeric())
+        isinstance(value, (float, int))
+        or (isinstance(value, str) and value.isnumeric())
     ):
-        return float32(value)
+        return float32(value) if allow_sdk_types else float(value)
 
     # If we reach this point, we could not match the value with the type and we raise
     if not isinstance(value, value_type):
@@ -202,20 +241,23 @@ def parse_value(name: str, value: Any, value_type: Any, default: Any = MISSING) 
     return value
 
 
-def dataclass_from_dict(cls: type[_T], dict_obj: dict, strict: bool = False) -> _T:
+def dataclass_from_dict(
+    cls: type[_T], dict_obj: dict, strict: bool = False, allow_sdk_types: bool = False
+) -> _T:
     """
     Create (instance of) a dataclass by providing a dict with values.
 
     Including support for nested structures and common type conversions.
     If strict mode enabled, any additional keys in the provided dict will result in a KeyError.
     """
+    dc_fields = cached_fields(cls)
     if strict:
-        extra_keys = dict_obj.keys() - {f.name for f in fields(cls)}
+        extra_keys = dict_obj.keys() - {f.name for f in dc_fields}
         if extra_keys:
             raise KeyError(
                 f'Extra key(s) {",".join(extra_keys)} not allowed for {str(cls)}'
             )
-    type_hints = get_type_hints(cls)
+    type_hints = cached_type_hints(cls)
     return cls(
         **{
             field.name: parse_value(
@@ -223,8 +265,10 @@ def dataclass_from_dict(cls: type[_T], dict_obj: dict, strict: bool = False) -> 
                 dict_obj.get(field.name),
                 type_hints[field.name],
                 field.default,
+                allow_none=not strict,
+                allow_sdk_types=allow_sdk_types,
             )
-            for field in fields(cls)
+            for field in dc_fields
             if field.init
         }
     )
@@ -258,3 +302,30 @@ def chip_core_version() -> str:
         # TODO: Fix this once we can install our own wheels on macos.
         return chip_clusters_version()
     return package_version(CHIP_CORE_PKG_NAME)
+
+
+def convert_hex_string(hex_str: str | bytes) -> str:
+    """Convert (Base64 encoded) byte array received from the sdk to a regular (unicode) string."""
+    if isinstance(hex_str, str):
+        # note that the bytes string can be optionally base64 encoded
+        # when we send it back and forth over our api
+        hex_str = base64.b64decode(hex_str)
+
+    return "".join(f"{byte:02x}" for byte in hex_str)
+
+
+def convert_mac_address(hex_mac: str | bytes) -> str:
+    """Convert (Base64 encoded) byte array MAC received from the sdk to a regular mac-address."""
+    if isinstance(hex_mac, str):
+        # note that the bytes string can be optionally base64 encoded
+        hex_mac = base64.b64decode(hex_mac)
+
+    return ":".join("{:02x}".format(byte) for byte in hex_mac)  # pylint: disable=C0209
+
+
+def convert_ip_address(hex_ip: str | bytes, ipv6: bool = False) -> str:
+    """Convert (Base64 encoded) byte array IP received from the Matter SDK to a regular IP."""
+    if isinstance(hex_ip, str):
+        # note that the bytes string can be optionally base64 encoded
+        hex_ip = base64.b64decode(hex_ip)
+    return socket.inet_ntop(socket.AF_INET6 if ipv6 else socket.AF_INET, hex_ip)
