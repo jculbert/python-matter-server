@@ -19,6 +19,8 @@ RUN \
         gdb \
         vim \
         net-tools \
+        avahi-utils \
+        inetutils-ping \
     && apt-get purge -y --auto-remove \
     && rm -rf \
         /var/lib/apt/lists/* \
